@@ -1,0 +1,174 @@
+{
+  "asset": "BTCUSDT",
+  "market": "spot",
+  "interval": "1d",
+  "rows": 2830,
+  "first_open": "2019-01-01T00:00:00+00:00",
+  "last_open": "2026-09-30T00:00:00+00:00",
+  "periods": {
+    "training": {
+      "start": "2019-01-01",
+      "end": "2022-12-31",
+      "models": {
+        "historical_quantile": {
+          "1": {
+            "observations": 1431,
+            "mean_absolute_error": 652.4098141397993,
+            "mean_absolute_percentage_error": 0.02584903619492701,
+            "directional_accuracy": 0.5122292103424179,
+            "directional_calls": 1431,
+            "interval_coverage": 0.777078965758211,
+            "mean_interval_width": 1903.3653744295711,
+            "mean_interval_score": 3418.799371730721
+          },
+          "7": {
+            "observations": 1425,
+            "mean_absolute_error": 1845.4592977165198,
+            "mean_absolute_percentage_error": 0.0739820712748639,
+            "directional_accuracy": 0.5207017543859649,
+            "directional_calls": 1425,
+            "interval_coverage": 0.7691228070175439,
+            "mean_interval_width": 5741.865001264354,
+            "mean_interval_score": 9305.717178364097
+          }
+        },
+        "random_walk": {
+          "1": {
+            "observations": 1431,
+            "mean_absolute_error": 650.8326764500349,
+            "mean_absolute_percentage_error": 0.025789138469151547,
+            "directional_accuracy": null,
+            "directional_calls": 0,
+            "interval_coverage": 0.7756813417190775,
+            "mean_interval_width": 1903.3653744295716,
+            "mean_interval_score": 3409.1313500144956
+          },
+          "7": {
+            "observations": 1425,
+            "mean_absolute_error": 1821.278554385965,
+            "mean_absolute_percentage_error": 0.0727652570565903,
+            "directional_accuracy": null,
+            "directional_calls": 0,
+            "interval_coverage": 0.7768421052631579,
+            "mean_interval_width": 5741.865001264354,
+            "mean_interval_score": 9074.38866381051
+          }
+        }
+      }
+    },
+    "validation": {
+      "start": "2023-01-01",
+      "end": "2024-12-31",
+      "models": {
+        "historical_quantile": {
+          "1": {
+            "observations": 730,
+            "mean_absolute_error": 881.0606504464538,
+            "mean_absolute_percentage_error": 0.017664757542442407,
+            "directional_accuracy": 0.5136986301369864,
+            "directional_calls": 730,
+            "interval_coverage": 0.8657534246575342,
+            "mean_interval_width": 3538.489718110298,
+            "mean_interval_score": 4699.649183434335
+          },
+          "7": {
+            "observations": 724,
+            "mean_absolute_error": 2470.643618803277,
+            "mean_absolute_percentage_error": 0.05066844137168878,
+            "directional_accuracy": 0.5649171270718232,
+            "directional_calls": 724,
+            "interval_coverage": 0.888121546961326,
+            "mean_interval_width": 10409.59866847448,
+            "mean_interval_score": 12496.745889839613
+          }
+        },
+        "random_walk": {
+          "1": {
+            "observations": 730,
+            "mean_absolute_error": 880.7371095890412,
+            "mean_absolute_percentage_error": 0.01764298546791722,
+            "directional_accuracy": null,
+            "directional_calls": 0,
+            "interval_coverage": 0.8712328767123287,
+            "mean_interval_width": 3538.489718110298,
+            "mean_interval_score": 4701.482467939679
+          },
+          "7": {
+            "observations": 724,
+            "mean_absolute_error": 2483.612527624309,
+            "mean_absolute_percentage_error": 0.050718889728824317,
+            "directional_accuracy": null,
+            "directional_calls": 0,
+            "interval_coverage": 0.8895027624309392,
+            "mean_interval_width": 10409.59866847448,
+            "mean_interval_score": 12547.425198390347
+          }
+        }
+      }
+    }
+  },
+  "holdout": {
+    "start": "2025-01-01",
+    "end": "2026-09-30",
+    "metrics": null,
+    "reason": "закрытый период: метрики не считались"
+  },
+  "leakage_checks": [
+    {
+      "period": "validation",
+      "horizon_days": 1,
+      "model": "HistoricalQuantileBaseline",
+      "mutate_from": "2025-01-01",
+      "passed": true
+    },
+    {
+      "period": "validation",
+      "horizon_days": 1,
+      "model": "RandomWalkBaseline",
+      "mutate_from": "2025-01-01",
+      "passed": true
+    },
+    {
+      "period": "validation",
+      "horizon_days": 7,
+      "model": "HistoricalQuantileBaseline",
+      "mutate_from": "2025-01-01",
+      "passed": true
+    },
+    {
+      "period": "validation",
+      "horizon_days": 7,
+      "model": "RandomWalkBaseline",
+      "mutate_from": "2025-01-01",
+      "passed": true
+    },
+    {
+      "period": "training",
+      "horizon_days": 1,
+      "model": "HistoricalQuantileBaseline",
+      "mutate_from": "2023-01-01",
+      "passed": true
+    },
+    {
+      "period": "training",
+      "horizon_days": 1,
+      "model": "RandomWalkBaseline",
+      "mutate_from": "2023-01-01",
+      "passed": true
+    },
+    {
+      "period": "training",
+      "horizon_days": 7,
+      "model": "HistoricalQuantileBaseline",
+      "mutate_from": "2023-01-01",
+      "passed": true
+    },
+    {
+      "period": "training",
+      "horizon_days": 7,
+      "model": "RandomWalkBaseline",
+      "mutate_from": "2023-01-01",
+      "passed": true
+    }
+  ]
+}
