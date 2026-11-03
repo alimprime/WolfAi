@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Исследовательский агент для вероятностных сценариев цены BTC и ETH"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["pydantic>=2"]
+dependencies = ["pydantic>=2", "duckdb>=1.1"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

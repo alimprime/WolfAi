@@ -7,6 +7,8 @@ from wolfai.data.availability import (
     require_usable,
     usable_at,
 )
+from wolfai.data.gateway import admit_daily_research, admit_observations, require_calendar_days
+from wolfai.data.history import SCHEMA_VERSION, DatasetManifest, HistoricalStore
 from wolfai.data.binance import (
     assert_filename_period,
     daily_bar_available_at,
@@ -31,12 +33,17 @@ from wolfai.data.candles import (
 from wolfai.data.provenance import DataProvenance, require_visible, visible_at
 
 __all__ = [
+    "SCHEMA_VERSION",
     "Candle",
     "CandleRead",
     "DataAvailability",
     "DataIssue",
     "DataProvenance",
+    "DatasetManifest",
+    "HistoricalStore",
     "ValidationReport",
+    "admit_daily_research",
+    "admit_observations",
     "assert_filename_period",
     "candle_availability",
     "daily_bar_available_at",
@@ -47,6 +54,7 @@ __all__ = [
     "load_candles",
     "read_candles",
     "read_sha256_checksum",
+    "require_calendar_days",
     "require_usable",
     "require_visible",
     "save_normalized_candles",
