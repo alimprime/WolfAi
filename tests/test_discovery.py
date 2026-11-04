@@ -181,11 +181,14 @@ def test_pysr_keeps_diverse_candidates_and_does_not_run_without_julia(tmp_path: 
     assert LIGHT_LIMITS["procs"] == 1
     assert LIGHT_LIMITS["niterations"] <= 8
     assert LIGHT_LIMITS["timeout_seconds"] <= 60
-    status = discovery_status()
-    assert status["julia"] is False
-    assert status["pysr"] is False
-    with pytest.raises(DiscoveryUnavailable, match="не устанавливались"):
-        discover([], [], dataset_version="v", horizon_days=1)
+    with patch("wolfai.research.pysr_engine.shutil.which", return_value=None), patch(
+        "wolfai.research.pysr_engine.importlib.util.find_spec", return_value=None
+    ):
+        status = discovery_status()
+        assert status["julia"] is False
+        assert status["pysr"] is False
+        with pytest.raises(DiscoveryUnavailable, match="не устанавливались"):
+            discover([], [], dataset_version="v", horizon_days=1)
 
 
 def test_windows_drop_overlapping_targets_and_holdout() -> None:

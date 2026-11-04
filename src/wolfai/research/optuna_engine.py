@@ -58,9 +58,26 @@ class OptimizationResult:
     reason: str
 
 
+class OptimizerUnavailable(RuntimeError):
+    """Настоящий Optuna не установлен. TPE не запускался."""
+
+
 class ProposalPlan:
     def propose(self, index: int) -> tuple[float, ...] | None:
         raise NotImplementedError
+
+
+def _resolve_backend(requested: str, plan: ProposalPlan | None) -> str:
+    """Сетка остаётся путём обычного pytest. TPE включается только явным backend."""
+    if plan is not None:
+        return "grid"
+    if requested == "grid":
+        return "grid"
+    if requested == "optuna":
+        if not _optuna_installed():
+            raise OptimizerUnavailable("Optuna не установлена; TPE не запускался")
+        return "optuna"
+    raise ValueError("backend должен быть grid или optuna")
 
 
 class GridPlan(ProposalPlan):
@@ -86,6 +103,7 @@ def optimize_coefficients(
     memory: ExperimentMemory | None = None,
     plan: ProposalPlan | None = None,
     created_at: datetime | None = None,
+    backend: str = "grid",
 ) -> OptimizationResult:
     if type(n_trials) is not int or not 1 <= n_trials <= MAX_TRIALS:
         raise ValueError("на гипотезу допускается от 1 до 20 испытаний")
@@ -96,9 +114,7 @@ def optimize_coefficients(
     names = tuple(features)
     tree = parse_formula(expression)
     start = list_coefficients(tree)
-    backend = "grid" if plan is None and not _optuna_installed() else "optuna"
-    if plan is not None:
-        backend = "grid"
+    backend = _resolve_backend(backend, plan)
     settings = _settings(backend, timeout_seconds)
     key = _key(expression, names, horizon_days, dataset_version, seed, n_trials, settings)
     if memory is not None:
@@ -131,12 +147,10 @@ def optimize_coefficients(
         return result
     rows = build_experiment_rows(candles, horizon_days)
     started = time.perf_counter()
-    if plan is None and _optuna_installed():
+    if plan is None and backend == "optuna":
         plan = _OptunaPlan(len(start), seed)
-        backend = "optuna"
     elif plan is None:
         plan = GridPlan(start, n_trials, seed)
-        backend = "grid"
     trials: list[TrialRecord] = []
     best_check: float | None = None
     best_expression = expression

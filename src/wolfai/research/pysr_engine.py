@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import shutil
 import subprocess
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from wolfai.research.budget import exclusive_search
@@ -90,6 +91,53 @@ def discover(
     )
 
 
+@dataclass(frozen=True)
+class RejectedEquation:
+    equation: str
+    reason: str
+
+
+def classify_equations(
+    equations: list[str],
+    *,
+    feature_names: tuple[str, ...] = FEATURES,
+    horizon_days: int,
+    dataset_version: str,
+    created_at: datetime,
+    max_candidates: int = MAX_CANDIDATES,
+) -> tuple[tuple[ResearchHypothesis, ...], tuple[RejectedEquation, ...]]:
+    """Принятые формулы и причины отклонения. Отклонённый текст не исполняется."""
+    if max_candidates < 1:
+        raise ValueError("нужен хотя бы один кандидат")
+    accepted: list[ResearchHypothesis] = []
+    rejected: list[RejectedEquation] = []
+    seen: set[tuple[object, ...]] = set()
+    for index, equation in enumerate(equations):
+        try:
+            expression = equation_to_expression(equation, feature_names)
+            tree = parse_formula(expression)
+        except FormulaError as error:
+            rejected.append(RejectedEquation(equation, str(error)[:200]))
+            continue
+        key = skeleton(tree)
+        if key in seen:
+            rejected.append(RejectedEquation(equation, "повтор структуры"))
+            continue
+        seen.add(key)
+        accepted.append(bind_hypothesis(
+            id=f"pysr-{index}",
+            origin=ORIGIN_PYSR,
+            expression=expression,
+            features=tuple(sorted(feature_names_used(tree))),
+            horizon_days=horizon_days,
+            dataset_version=dataset_version,
+            created_at=created_at,
+            source_expression=equation.strip(),
+        ))
+    accepted.sort(key=lambda item: node_count(parse_formula(item.expression)))
+    return tuple(_spread(accepted, max_candidates)), tuple(rejected)
+
+
 def select_candidates(
     equations: list[str],
     *,
@@ -100,33 +148,15 @@ def select_candidates(
     max_candidates: int = MAX_CANDIDATES,
 ) -> tuple[ResearchHypothesis, ...]:
     """Оставляет разные по структуре формулы, а не одну самую сложную."""
-    if max_candidates < 1:
-        raise ValueError("нужен хотя бы один кандидат")
-    accepted: list[ResearchHypothesis] = []
-    seen: set[tuple[object, ...]] = set()
-    for index, equation in enumerate(equations):
-        try:
-            expression = equation_to_expression(equation, feature_names)
-            tree = parse_formula(expression)
-        except FormulaError:
-            continue
-        key = skeleton(tree)
-        if key in seen:
-            continue
-        seen.add(key)
-        hypothesis = bind_hypothesis(
-            id=f"pysr-{index}",
-            origin=ORIGIN_PYSR,
-            expression=expression,
-            features=tuple(sorted(feature_names_used(tree))),
-            horizon_days=horizon_days,
-            dataset_version=dataset_version,
-            created_at=created_at,
-            source_expression=equation.strip(),
-        )
-        accepted.append(hypothesis)
-    accepted.sort(key=lambda item: node_count(parse_formula(item.expression)))
-    return tuple(_spread(accepted, max_candidates))
+    accepted, _rejected = classify_equations(
+        equations,
+        feature_names=feature_names,
+        horizon_days=horizon_days,
+        dataset_version=dataset_version,
+        created_at=created_at,
+        max_candidates=max_candidates,
+    )
+    return accepted
 
 
 def feature_names_used(tree) -> set[str]:
