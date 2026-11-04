@@ -68,8 +68,45 @@ def discover(
     created_at: datetime | None = None,
     seed: int = 1729,
     max_candidates: int = MAX_CANDIDATES,
+    strategy: str = "baseline",
 ) -> tuple[ResearchHypothesis, ...]:
     """Реальный поиск. Без Julia и PySR завершается до запуска модели."""
+    return discover_report(
+        rows,
+        labels,
+        feature_names=feature_names,
+        horizon_days=horizon_days,
+        dataset_version=dataset_version,
+        created_at=created_at,
+        seed=seed,
+        max_candidates=max_candidates,
+        strategy=strategy,
+    ).hypotheses
+
+
+def discover_report(
+    rows: list[dict[str, float]],
+    labels: list[int],
+    *,
+    feature_names: tuple[str, ...] = FEATURES,
+    horizon_days: int = 1,
+    dataset_version: str,
+    created_at: datetime | None = None,
+    seed: int = 1729,
+    max_candidates: int = MAX_CANDIDATES,
+    strategy: str = "baseline",
+):
+    """Тот же лёгкий бюджет. Улучшенная стратегия не добавляет итераций."""
+    from wolfai.research.symbolic_strategy import (
+        STRATEGY_BASELINE,
+        STRATEGY_IMPROVED,
+        RejectedFormula,
+        SearchAssembly,
+        screen_equations,
+    )
+
+    if strategy not in {STRATEGY_BASELINE, STRATEGY_IMPROVED}:
+        raise ValueError("стратегия поиска должна быть baseline или improved")
     if not _runtime_ready():
         raise DiscoveryUnavailable(
             "PySR или Julia недоступны. Поиск не запускался и компоненты не устанавливались."
@@ -79,10 +116,34 @@ def discover(
     if len(rows) != len(labels) or len(rows) < 20:
         raise ValueError("для символического поиска слишком мало строк")
     with exclusive_search("pysr"):
-        equations = _fit_pysr(rows, labels, feature_names, seed)
+        records = _fit_table(rows, labels, feature_names, seed, strategy)
     moment = created_at or datetime.now(timezone.utc)
-    return select_candidates(
+    equations = [record.equation for record in records]
+    if strategy == STRATEGY_BASELINE:
+        accepted, rejected = classify_equations(
+            equations,
+            feature_names=feature_names,
+            horizon_days=horizon_days,
+            dataset_version=dataset_version,
+            created_at=moment,
+            max_candidates=max_candidates,
+        )
+        structures = {skeleton(parse_formula(item.expression)) for item in accepted}
+        return SearchAssembly(
+            hypotheses=accepted,
+            rejected=tuple(RejectedFormula(item.equation, item.reason) for item in rejected),
+            unique_structures=len(structures),
+            screened=len(accepted),
+            pareto_size=len(accepted),
+            examined=len(equations),
+            selector="baseline-spread",
+        )
+    losses = None if any(record.loss is None for record in records) else [
+        float(record.loss) for record in records if record.loss is not None
+    ]
+    return screen_equations(
         equations,
+        losses,
         feature_names=feature_names,
         horizon_days=horizon_days,
         dataset_version=dataset_version,
@@ -202,6 +263,47 @@ def _julia_version(executable: str) -> str | None:
     return text or None
 
 
+@dataclass(frozen=True)
+class EquationRecord:
+    equation: str
+    loss: float | None
+
+
+def regressor_settings(strategy: str, seed: int) -> dict[str, object]:
+    """Общие пределы поиска. Улучшение не поднимает итерации, популяции и процессы."""
+    if strategy not in {"baseline", "improved"}:
+        raise ValueError("стратегия поиска должна быть baseline или improved")
+    settings: dict[str, object] = {
+        "niterations": LIGHT_LIMITS["niterations"],
+        "binary_operators": ["+", "-", "*", "/"],
+        "unary_operators": ["abs", "tanh"],
+        "maxsize": LIGHT_LIMITS["maxsize"],
+        "maxdepth": LIGHT_LIMITS["maxdepth"],
+        "populations": LIGHT_LIMITS["populations"],
+        "population_size": LIGHT_LIMITS["population_size"],
+        "procs": LIGHT_LIMITS["procs"],
+        "parallelism": LIGHT_LIMITS["parallelism"],
+        "random_state": seed,
+        "timeout_in_seconds": LIGHT_LIMITS["timeout_seconds"],
+        "deterministic": True,
+        "temp_equation_file": True,
+        "elementwise_loss": LOGISTIC_LOSS_JULIA,
+    }
+    if strategy == "improved":
+        from wolfai.research.symbolic_strategy import extra_regressor_options
+
+        settings.update(extra_regressor_options())
+    if (
+        settings["niterations"] != LIGHT_LIMITS["niterations"]
+        or settings["populations"] != LIGHT_LIMITS["populations"]
+        or settings["population_size"] != LIGHT_LIMITS["population_size"]
+        or settings["procs"] != 1
+        or float(settings["timeout_in_seconds"]) > float(LIGHT_LIMITS["timeout_seconds"])
+    ):
+        raise ValueError("бюджет PySR нельзя увеличивать")
+    return settings
+
+
 def _fit_pysr(
     rows: list[dict[str, float]],
     labels: list[int],
@@ -209,6 +311,19 @@ def _fit_pysr(
     seed: int,
 ) -> list[str]:
     """Вызывается только при установленном PySR. Потоки и процессы ограничены."""
+    return [
+        record.equation
+        for record in _fit_table(rows, labels, feature_names, seed, "baseline")
+    ]
+
+
+def _fit_table(
+    rows: list[dict[str, float]],
+    labels: list[int],
+    feature_names: tuple[str, ...],
+    seed: int,
+    strategy: str,
+) -> list[EquationRecord]:
     import os
 
     os.environ["JULIA_NUM_THREADS"] = "1"
@@ -216,23 +331,16 @@ def _fit_pysr(
     os.environ["OPENBLAS_NUM_THREADS"] = "1"
     from pysr import PySRRegressor
 
-    model = PySRRegressor(
-        niterations=LIGHT_LIMITS["niterations"],
-        binary_operators=["+", "-", "*", "/"],
-        unary_operators=["abs", "tanh"],
-        maxsize=LIGHT_LIMITS["maxsize"],
-        maxdepth=LIGHT_LIMITS["maxdepth"],
-        populations=LIGHT_LIMITS["populations"],
-        population_size=LIGHT_LIMITS["population_size"],
-        procs=LIGHT_LIMITS["procs"],
-        parallelism=LIGHT_LIMITS["parallelism"],
-        random_state=seed,
-        timeout_in_seconds=LIGHT_LIMITS["timeout_seconds"],
-        deterministic=True,
-        temp_equation_file=True,
-        elementwise_loss=LOGISTIC_LOSS_JULIA,
-    )
+    model = PySRRegressor(**regressor_settings(strategy, seed))
     frame = [[row[name] for name in feature_names] for row in rows]
     model.fit(frame, labels, variable_names=list(feature_names))
     table = model.equations_
-    return [str(value) for value in table["equation"].tolist()]
+    equations = [str(value) for value in table["equation"].tolist()]
+    if "loss" in getattr(table, "columns", ()):
+        losses = [float(value) for value in table["loss"].tolist()]
+    else:
+        losses = [None] * len(equations)
+    return [
+        EquationRecord(equation, loss)
+        for equation, loss in zip(equations, losses, strict=True)
+    ]
