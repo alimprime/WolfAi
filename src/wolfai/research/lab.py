@@ -48,6 +48,7 @@ from wolfai.research.generator import (
 )
 from wolfai.research.hypothesis import HypothesisSchemaError
 from wolfai.research.ollama import ModelRejectedOutput, OllamaUnavailable
+from wolfai.research.budget import SearchBusy, exclusive_search
 
 MAX_LAB_HYPOTHESES = 5
 SCHEMA_REPAIRS = 1
@@ -186,6 +187,33 @@ def run_qwen_lab(
         return _empty(stop_reason="insufficient_history", message=str(error), data_checksum=checksum)
     except ValueError as error:
         return _empty(stop_reason="data_rejected", message=str(error), data_checksum=checksum)
+    try:
+        with exclusive_search("qwen"):
+            return _run_qwen_model(
+                client,
+                store,
+                source,
+                memory,
+                frame=frame,
+                checksum=checksum,
+                max_hypotheses=max_hypotheses,
+                share_research_history=share_research_history,
+            )
+    except SearchBusy as error:
+        return _empty(stop_reason="busy", message=str(error), data_checksum=checksum)
+
+
+def _run_qwen_model(
+    client,
+    store: HistoricalStore,
+    source: str,
+    memory: ExperimentMemory,
+    *,
+    frame: ResearchFrame,
+    checksum: str,
+    max_hypotheses: int,
+    share_research_history: bool,
+) -> LabRun:
     try:
         client.health()
     except OllamaUnavailable as error:

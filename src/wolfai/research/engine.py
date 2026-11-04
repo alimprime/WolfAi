@@ -105,6 +105,17 @@ class ExperimentMemory:
             )
             """
         )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS discovery (
+                search_key TEXT PRIMARY KEY,
+                origin TEXT NOT NULL,
+                dataset_checksum TEXT NOT NULL,
+                code_version TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            """
+        )
         self._connection.commit()
 
     def close(self) -> None:
@@ -149,6 +160,56 @@ class ExperimentMemory:
         raise ValueError(
             f"рабочая модель не заменяется непроверенной гипотезой {hypothesis_id}"
         )
+
+    def find_discovery(self, key: str) -> dict[str, object] | None:
+        row = self._connection.execute(
+            "SELECT payload_json FROM discovery WHERE search_key = ?",
+            (key,),
+        ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(row[0])
+        if not isinstance(payload, dict):
+            raise ValueError("память поиска повреждена")
+        return payload
+
+    def save_discovery(
+        self,
+        key: str,
+        payload: dict[str, object],
+        *,
+        origin: str,
+        dataset_checksum: str,
+    ) -> None:
+        existing = self.find_discovery(key)
+        if existing is not None:
+            if _stable_discovery(existing) != _stable_discovery(payload):
+                raise ValueError("результат не воспроизвёлся")
+            return
+        self._connection.execute(
+            """
+            INSERT INTO discovery (
+                search_key, origin, dataset_checksum, code_version, payload_json
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                key,
+                origin,
+                dataset_checksum,
+                str(payload.get("code_version") or ""),
+                json.dumps(_canonical(payload), ensure_ascii=False, sort_keys=True),
+            ),
+        )
+        self._connection.commit()
+
+
+def _stable_discovery(payload: dict[str, object]) -> dict[str, object]:
+    cleaned = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"elapsed_seconds", "max_rss_bytes"}
+    }
+    return _canonical(cleaned)
 
 
 def score_direction(
