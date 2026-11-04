@@ -27,6 +27,7 @@ FEATURE_NAMES = (
     "volume_change",
     "range_position",
 )
+FEATURE_SCHEMA_VERSION = "ohlcv-daily-v1"
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,15 @@ def feature_vector(
     """
     if not _admitted:
         admit_daily_research(candles)
+    return features_from_closed_window(candles, index)
+
+
+def features_from_closed_window(candles: list[Candle], index: int) -> dict[str, float]:
+    """Признаки бара index. Свечи после него в расчёт не входят.
+
+    Holdout здесь не открывается и не проверяется: исследовательский вход
+    по-прежнему `feature_vector`. У этого вызова нет метки будущего close.
+    """
     if index < LOOKBACK:
         raise ValueError("недостаточно истории для признаков")
     require_calendar_days(candles, index - 1, index, 1)

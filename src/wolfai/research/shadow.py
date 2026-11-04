@@ -94,11 +94,26 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
     parser.add_argument("--channel", default="forward", choices=["forward", "reconstruction", "synthetic"])
     parser.add_argument("--fixture", default="")
     parser.add_argument("--live-source", default="")
+    parser.add_argument("--market-fixture", default="")
+    parser.add_argument("--commit", action="store_true")
+    parser.add_argument("--fetch-live", action="store_true")
     args = parser.parse_args(argv)
     ledger = PredictionLedger(args.ledger)
     registry = ForwardRegistry(args.registry) if args.registry else None
     try:
-        if args.channel == "forward" and args.live_source != "verified-local":
+        if args.fetch_live or args.market_fixture:
+            if args.channel != "forward":
+                result = {"status": "forward_only", "predictions_stored": 0, "outcomes_stored": 0}
+            else:
+                from wolfai.research.forward_mode import run_shadow_market
+
+                result = run_shadow_market(
+                    ledger=ledger,
+                    fixture_path=args.market_fixture,
+                    fetch_live=args.fetch_live and not args.market_fixture,
+                    commit=args.commit,
+                )
+        elif args.channel == "forward" and args.live_source != "verified-local":
             result = {"status": "source_unavailable", "predictions_stored": 0, "outcomes_stored": 0}
         elif not args.fixture:
             result = {"status": "market_data_missing", "predictions_stored": 0, "outcomes_stored": 0}
