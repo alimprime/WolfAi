@@ -14,6 +14,21 @@ from wolfai.research.hypothesis_protocol import QWEN_HYPOTHESIS_SCHEMA, REGIMES
 from wolfai.research.memory_context import MemoryExcerpt
 from wolfai.research.ollama import RESEARCH_SEED
 
+FEEDBACK_KEYS = frozenset({
+    "hypothesis_id",
+    "experiment_id",
+    "horizon_days",
+    "sample_count",
+    "brier_score",
+    "log_loss",
+    "baseline_brier",
+    "improvement",
+    "uncertainty",
+    "failure_reason",
+    "limitations",
+    "revision_allowed",
+})
+
 GENERATOR_ID = "qwen-research-brain"
 GENERATOR_VERSION = "3.0.0"
 MAX_BRIEF_CHARS = 500
@@ -30,6 +45,8 @@ rationale объясняет, чем гипотеза отличается от 
 expected_regime называет ожидаемое условие применимости из разрешённого списка.
 test_plan описывает проверку на синтетике или на окне 2019–2020.
 limitations называет неопределённость. Это не доказательство прогнозного преимущества.
+hypothesis_id — техническая метка. Календарный год в ней не является рыночными данными.
+description не является формулой и не выбирает ряд. Не объявляй свою формулу победителем.
 """
 
 
@@ -42,6 +59,7 @@ class BrainContext:
     reads_after_2021: bool = False
     fit_on_2021: bool = False
     prediction_ledger: object | None = None
+    feedback: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +108,8 @@ class QwenResearchBrain:
             return self._turn("time_boundary", "2021 год остаётся DEV_ONLY и не используется для подбора", calls=0)
         if not context.market_brief.strip() or len(context.market_brief) > MAX_BRIEF_CHARS:
             return self._turn("context_rejected", "описание ситуации пустое или длиннее бюджета", calls=0)
+        if context.feedback is not None and set(context.feedback) != FEEDBACK_KEYS:
+            return self._turn("context_rejected", "обратная связь содержит лишние поля", calls=0)
         messages = build_messages(context)
         prompt_chars = sum(len(item["content"]) for item in messages)
         generate = getattr(client, "generate", None)
@@ -154,6 +174,12 @@ def build_messages(context: BrainContext) -> list[dict[str, str]]:
             "year_2021": "DEV_ONLY",
         },
     }
+    if context.feedback is not None:
+        user["feedback"] = context.feedback
+        user["revision_rule"] = (
+            "Верни новую гипотезу. parent_hypothesis_id равен feedback.hypothesis_id. "
+            "Прежнюю формулу не заменяй. Причину изменения напиши в rationale."
+        )
     text = json.dumps(user, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     if len(text) > MAX_USER_CHARS:
         user["checked_hypotheses"] = []

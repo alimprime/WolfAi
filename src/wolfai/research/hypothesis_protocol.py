@@ -269,20 +269,45 @@ def _fields(raw: Mapping[str, object]) -> tuple[_Fields | None, ProtocolDecision
 
 
 def _scan_text(fields: _Fields) -> ProtocolDecision | None:
-    blob = "\n".join(
-        getattr(fields, name) if name != "hypothesis_id" else fields.suggested_id
-        for name in _TEXT_FIELDS
-    )
-    lowered = blob.lower()
+    """Год в техническом id и в описании не открывает рыночный ряд.
+
+    Исполняемая часть — только expression. Просьба использовать закрытый
+    период проверяется в плане и ограничениях, не в идентификаторе.
+    """
+    narrative = "\n".join((
+        fields.suggested_id,
+        fields.description,
+        fields.expression,
+        fields.rationale,
+        fields.expected_regime,
+        fields.test_plan,
+        fields.limitations,
+    ))
+    lowered = narrative.lower()
     if any(token in lowered for token in _CODE_TOKENS):
         return _reject("unsafe_math", "в тексте есть вызов, который не исполняется")
     if any(phrase in lowered for phrase in _RULE_PHRASES):
         return _reject("criteria_change", "текст пытается изменить критерий проверки")
-    if any(marker in lowered for marker in _FUTURE_MARKERS) or any(year in blob for year in _FUTURE_YEARS):
-        return _reject("time_boundary", "ответ ссылается на закрытые или будущие данные")
-    if _FIT_2021.search(blob):
-        return _reject("time_boundary", "2021 год остаётся DEV_ONLY и не используется для подбора")
+    if _closed_reference(fields.expression):
+        return _reject("time_boundary", "исполняемая часть ссылается на закрытые или будущие данные")
+    requested = "\n".join((
+        fields.rationale,
+        fields.expected_regime,
+        fields.test_plan,
+        fields.limitations,
+    ))
+    if _closed_reference(requested):
+        return _reject("time_boundary", "запрос проверки ссылается на закрытые или будущие данные")
     return None
+
+
+def _closed_reference(text: str) -> bool:
+    lowered = text.lower()
+    if any(marker in lowered for marker in _FUTURE_MARKERS):
+        return True
+    if any(year in text for year in _FUTURE_YEARS):
+        return True
+    return _FIT_2021.search(text) is not None
 
 
 def _duplicate(fields: _Fields, known: Sequence[KnownFormula]) -> tuple[str, str] | None:

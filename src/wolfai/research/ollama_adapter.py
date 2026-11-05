@@ -144,6 +144,7 @@ def build_adapter_body(
     seed: int,
     num_ctx: int,
     num_predict: int,
+    keep_alive: int = 0,
 ) -> dict[str, object]:
     """Тело чата без инструментов. Контекст и длина ответа ограничены."""
     if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
@@ -152,6 +153,8 @@ def build_adapter_body(
         raise ValueError("температура должна быть от 0 до 1")
     if type(seed) is not int:
         raise ValueError("seed должен быть целым")
+    if type(keep_alive) is not int or not 0 <= keep_alive <= 300:
+        raise ValueError("keep_alive должен быть целым числом секунд от 0 до 300")
     ctx, predict = clamp_budget(num_ctx, num_predict)
     if schema_mode == "schema" and schema is not None:
         response_format: object = schema
@@ -163,7 +166,7 @@ def build_adapter_body(
         "stream": False,
         "think": False,
         "format": response_format,
-        "keep_alive": 0,
+        "keep_alive": keep_alive,
         "options": {
             "temperature": float(temperature),
             "top_p": 1,
@@ -211,6 +214,7 @@ class OllamaAdapter:
         self.seed = seed
         self._transport = transport or _open_without_redirect
         self._memory_guard = memory_guard or default_memory_guard
+        self._release_wait_seconds = 0.0
         self._call_lock = threading.Lock()
         self.logs: list[AdapterResult] = []
         self.model_name = ""
@@ -225,6 +229,7 @@ class OllamaAdapter:
         schema: dict[str, object] | None = None,
         *,
         temperature: float = 0.0,
+        keep_alive: int = 0,
     ) -> AdapterResult:
         started = time.perf_counter()
         if not self._call_lock.acquire(blocking=False):
@@ -236,7 +241,13 @@ class OllamaAdapter:
                 temperature=0.0,
             )
         try:
-            return self._generate(messages, schema, temperature=temperature, started=started)
+            return self._generate(
+                messages,
+                schema,
+                temperature=temperature,
+                keep_alive=keep_alive,
+                started=started,
+            )
         except (URLError, TimeoutError, OSError, json.JSONDecodeError, OllamaUnavailable) as error:
             return self._finish(
                 "ollama_unavailable",
@@ -254,10 +265,11 @@ class OllamaAdapter:
         schema: dict[str, object] | None,
         *,
         temperature: float,
+        keep_alive: int,
         started: float,
     ) -> AdapterResult:
         temperature_value = _checked_temperature(temperature)
-        blocked = self._memory_guard()
+        blocked = self._wait_for_memory()
         if blocked:
             return self._finish(
                 "resource_limited",
@@ -287,11 +299,11 @@ class OllamaAdapter:
             )
             self.logs.append(timed)
             return timed
-        payload, problem, chat_attempts = self._chat(messages, schema, temperature_value)
+        payload, problem, chat_attempts = self._chat(messages, schema, temperature_value, keep_alive)
         attempts += chat_attempts
         if problem == "schema_rejected" and self.schema_mode == "schema":
             self.schema_mode = "json"
-            payload, problem, again = self._chat(messages, schema, temperature_value)
+            payload, problem, again = self._chat(messages, schema, temperature_value, keep_alive)
             attempts += again
         if problem == "timed_out":
             return self._finish(
@@ -351,6 +363,17 @@ class OllamaAdapter:
             temperature=temperature_value,
             content=content,
         )
+
+    def _wait_for_memory(self) -> str | None:
+        """Ждёт выгрузки предыдущего ответа той же модели, но не второй экземпляр."""
+        started = time.perf_counter()
+        while True:
+            blocked = self._memory_guard()
+            if not blocked:
+                return None
+            if time.perf_counter() - started >= self._release_wait_seconds:
+                return blocked
+            time.sleep(1)
 
     def _health(self) -> tuple[AdapterResult | None, int]:
         version_payload, problem, attempts = self._request("GET", "/api/version", None, timeout=min(self.timeout, 5))
@@ -466,6 +489,7 @@ class OllamaAdapter:
         messages: list[dict[str, str]],
         schema: dict[str, object] | None,
         temperature: float,
+        keep_alive: int,
     ) -> tuple[dict[str, object] | None, str | None, int]:
         body = build_adapter_body(
             self.model_name,
@@ -476,6 +500,7 @@ class OllamaAdapter:
             seed=self.seed,
             num_ctx=self.num_ctx,
             num_predict=self.num_predict,
+            keep_alive=keep_alive,
         )
         return self._request("POST", "/api/chat", body, timeout=self.timeout)
 
