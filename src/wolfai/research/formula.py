@@ -57,8 +57,11 @@ class EvalState:
     protected_divisions: int = 0
 
 
-def parse_formula(expression: str) -> Expr:
-    """Разбирает формулу в дерево. Корень обязан быть sigmoid."""
+def parse_expression(expression: str) -> Expr:
+    """Разбирает выражение без требования корня sigmoid.
+
+    Результат не является вероятностью и не используется как прогноз.
+    """
     if len(expression) > MAX_EXPRESSION_LENGTH:
         raise FormulaError("выражение длиннее 300 символов")
     parser = _Parser(expression)
@@ -66,6 +69,12 @@ def parse_formula(expression: str) -> Expr:
     parser.skip()
     if parser.i != len(parser.text):
         raise FormulaError("лишние символы в выражении")
+    return tree
+
+
+def parse_formula(expression: str) -> Expr:
+    """Разбирает формулу в дерево. Корень обязан быть sigmoid."""
+    tree = parse_expression(expression)
     if not isinstance(tree, Unary) or tree.op != "sigmoid":
         raise FormulaError("корень формулы должен быть sigmoid")
     if tree_depth(tree) > MAX_DEPTH:
