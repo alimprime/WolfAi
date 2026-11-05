@@ -89,6 +89,25 @@ class ResearchMemory:
         row = self._connection.execute("SELECT COUNT(*) FROM experiments").fetchone()
         return int(row[0])
 
+    def public_records(self, limit: int = 8) -> list[dict[str, object]]:
+        """Короткий снимок реестра для контролируемого контекста. Записи не меняет."""
+        if type(limit) is not int or not 1 <= limit <= 32:
+            raise ValueError("лимит контекста должен быть от 1 до 32")
+        rows = self._connection.execute(
+            "SELECT payload_json FROM experiments ORDER BY rowid LIMIT ?",
+            (limit,),
+        ).fetchall()
+        found: list[dict[str, object]] = []
+        for row in rows:
+            payload = json.loads(row[0])
+            if isinstance(payload, dict):
+                found.append(payload)
+        return found
+
+    def rollback_open(self) -> None:
+        """Снимает незавершённую транзакцию. Уже зафиксированные строки остаются."""
+        self._connection.rollback()
+
 
 def experiment_key(payload: dict[str, object]) -> str:
     identity = {name: payload[name] for name in IDENTITY}

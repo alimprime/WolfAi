@@ -607,6 +607,20 @@ class HypothesisStore:
         row = self._connection.execute("SELECT COUNT(*) FROM attempts").fetchone()
         return int(row[0])
 
+    def failure_details(self) -> list[str]:
+        rows = self._connection.execute(
+            """
+            SELECT detail FROM attempts
+            WHERE succeeded = 0
+            ORDER BY created_at, attempt_id
+            """
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def rollback_open(self) -> None:
+        """Снимает незавершённую транзакцию. Уже зафиксированные строки остаются."""
+        self._connection.rollback()
+
     def _ancestor_ids(self, hypothesis_id: str) -> set[str]:
         found: set[str] = set()
         current = hypothesis_id
