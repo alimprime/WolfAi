@@ -29,7 +29,10 @@ from wolfai.research.ollama import (
 )
 
 STAGE30_NUM_CTX = 2048
-STAGE30_NUM_PREDICT = 512
+# 512 токенов не вмещают пересмотр: при прежних полях до 300 символов
+# JSON занимает 3207 символов. Потолок ответа поднят только здесь.
+# Контекст остаётся 2048. Вторая модель из-за этого не загружается.
+STAGE30_NUM_PREDICT = 1024
 STAGE30_TIMEOUT_SECONDS = 60.0
 STAGE30_MAX_TIMEOUT_SECONDS = 180.0
 STAGE30_ATTEMPTS = 3
@@ -58,6 +61,12 @@ class AdapterResult:
     seed: int = STAGE30_SEED
     num_ctx: int = STAGE30_NUM_CTX
     num_predict: int = STAGE30_NUM_PREDICT
+    schema_mode: str = ""
+    format_fallback: bool = False
+    fallback_reason: str = ""
+    truncated: bool = False
+    done_reason: str = ""
+    generation_requests: int = 1
 
 
 def process_rss_bytes() -> int:
@@ -222,6 +231,8 @@ class OllamaAdapter:
         self.parameter_size = ""
         self.ollama_version = ""
         self.schema_mode = "json"
+        self.allow_format_fallback = True
+        self.generation_budget: int | None = None
 
     def generate(
         self,
@@ -299,12 +310,40 @@ class OllamaAdapter:
             )
             self.logs.append(timed)
             return timed
-        payload, problem, chat_attempts = self._chat(messages, schema, temperature_value, keep_alive)
+        mode = "schema" if self.schema_mode == "schema" and schema is not None else "json"
+        cap = None if self.generation_budget is None else max(0, self.generation_budget)
+        payload, problem, chat_attempts = self._chat(
+            messages, schema, temperature_value, keep_alive, attempt_cap=cap,
+        )
         attempts += chat_attempts
-        if problem == "schema_rejected" and self.schema_mode == "schema":
-            self.schema_mode = "json"
-            payload, problem, again = self._chat(messages, schema, temperature_value, keep_alive)
-            attempts += again
+        spent = chat_attempts
+        fallback = False
+        fallback_reason = ""
+        if problem == "schema_rejected" and mode == "schema":
+            fallback_reason = "сервер вернул 400 на JSON Schema"
+            if self._fallback_fits(spent):
+                self.schema_mode = "json"
+                mode = "json"
+                rest = None if self.generation_budget is None else max(0, self.generation_budget - spent)
+                payload, problem, again = self._chat(
+                    messages, schema, temperature_value, keep_alive, attempt_cap=rest,
+                )
+                attempts += again
+                spent += again
+                fallback = True
+            else:
+                fallback_reason = "сервер вернул 400 на JSON Schema; повтор не отправлен, бюджет генерации исчерпан"
+                return self._finish(
+                    "schema_rejected",
+                    fallback_reason,
+                    started,
+                    attempts=attempts,
+                    temperature=temperature_value,
+                    schema_mode="schema",
+                    format_fallback=False,
+                    fallback_reason=fallback_reason,
+                    generation_requests=spent,
+                )
         if problem == "timed_out":
             return self._finish(
                 "timed_out",
@@ -312,6 +351,10 @@ class OllamaAdapter:
                 started,
                 attempts=attempts,
                 temperature=temperature_value,
+                schema_mode=mode,
+                format_fallback=fallback,
+                fallback_reason=fallback_reason,
+                generation_requests=spent,
             )
         if problem is not None or payload is None:
             return self._finish(
@@ -320,6 +363,10 @@ class OllamaAdapter:
                 started,
                 attempts=attempts,
                 temperature=temperature_value,
+                schema_mode=mode,
+                format_fallback=fallback,
+                fallback_reason=fallback_reason,
+                generation_requests=spent,
             )
         message = payload.get("message")
         if not isinstance(message, dict):
@@ -329,6 +376,10 @@ class OllamaAdapter:
                 started,
                 attempts=attempts,
                 temperature=temperature_value,
+                schema_mode=mode,
+                format_fallback=fallback,
+                fallback_reason=fallback_reason,
+                generation_requests=spent,
             )
         if message.get("tool_calls"):
             return self._finish(
@@ -337,6 +388,10 @@ class OllamaAdapter:
                 started,
                 attempts=attempts,
                 temperature=temperature_value,
+                schema_mode=mode,
+                format_fallback=fallback,
+                fallback_reason=fallback_reason,
+                generation_requests=spent,
             )
         content = message.get("content")
         if not isinstance(content, str) or not content.strip():
@@ -346,7 +401,13 @@ class OllamaAdapter:
                 started,
                 attempts=attempts,
                 temperature=temperature_value,
+                schema_mode=mode,
+                format_fallback=fallback,
+                fallback_reason=fallback_reason,
+                generation_requests=spent,
             )
+        done_reason = payload.get("done_reason")
+        truncated = done_reason == "length"
         if len(content) > 4000:
             return self._finish(
                 "rejected",
@@ -354,6 +415,12 @@ class OllamaAdapter:
                 started,
                 attempts=attempts,
                 temperature=temperature_value,
+                schema_mode=mode,
+                format_fallback=fallback,
+                fallback_reason=fallback_reason,
+                truncated=truncated,
+                done_reason=str(done_reason or ""),
+                generation_requests=spent,
             )
         return self._finish(
             "ok",
@@ -362,7 +429,20 @@ class OllamaAdapter:
             attempts=attempts,
             temperature=temperature_value,
             content=content,
+            schema_mode=mode,
+            format_fallback=fallback,
+            fallback_reason=fallback_reason,
+            truncated=truncated,
+            done_reason=str(done_reason or ""),
+            generation_requests=spent,
         )
+
+    def _fallback_fits(self, spent: int) -> bool:
+        if not self.allow_format_fallback:
+            return False
+        if self.generation_budget is None:
+            return True
+        return spent < self.generation_budget
 
     def _wait_for_memory(self) -> str | None:
         """Ждёт выгрузки предыдущего ответа той же модели, но не второй экземпляр."""
@@ -490,6 +570,8 @@ class OllamaAdapter:
         schema: dict[str, object] | None,
         temperature: float,
         keep_alive: int,
+        *,
+        attempt_cap: int | None = None,
     ) -> tuple[dict[str, object] | None, str | None, int]:
         body = build_adapter_body(
             self.model_name,
@@ -502,7 +584,7 @@ class OllamaAdapter:
             num_predict=self.num_predict,
             keep_alive=keep_alive,
         )
-        return self._request("POST", "/api/chat", body, timeout=self.timeout)
+        return self._request("POST", "/api/chat", body, timeout=self.timeout, max_tries=attempt_cap)
 
     def _request(
         self,
@@ -511,13 +593,17 @@ class OllamaAdapter:
         body: dict[str, object] | None,
         *,
         timeout: float,
+        max_tries: int | None = None,
     ) -> tuple[dict[str, object] | None, str | None, int]:
         if path not in _ALLOWED_PATHS:
             return None, "ollama_unavailable", 0
         data = None if body is None else json.dumps(body).encode("utf-8")
         last = "ollama_unavailable"
         attempts = 0
-        for _ in range(self.http_attempts):
+        limit = self.http_attempts if max_tries is None else max(0, min(self.http_attempts, max_tries))
+        if limit == 0:
+            return None, "ollama_unavailable", 0
+        for _ in range(limit):
             attempts += 1
             request = Request(
                 f"{self.base_url}{path}",
@@ -566,6 +652,12 @@ class OllamaAdapter:
         attempts: int,
         temperature: float,
         content: str | None = None,
+        schema_mode: str = "",
+        format_fallback: bool = False,
+        fallback_reason: str = "",
+        truncated: bool = False,
+        done_reason: str = "",
+        generation_requests: int = 1,
     ) -> AdapterResult:
         result = AdapterResult(
             status=status,
@@ -583,6 +675,12 @@ class OllamaAdapter:
             seed=self.seed,
             num_ctx=self.num_ctx,
             num_predict=self.num_predict,
+            schema_mode=schema_mode,
+            format_fallback=format_fallback,
+            fallback_reason=fallback_reason,
+            truncated=truncated,
+            done_reason=done_reason,
+            generation_requests=generation_requests,
         )
         self.logs.append(result)
         return result

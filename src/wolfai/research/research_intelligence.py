@@ -108,6 +108,15 @@ class IntelligenceAttempt:
     persisted: bool = False
     revision_reason: str | None = None
     detail: str = ""
+    parent_brier: float | None = None
+    parent_delta: float | None = None
+    format_normalized: bool = False
+    schema_mode: str = ""
+    format_fallback: bool = False
+    fallback_reason: str = ""
+    truncated: bool = False
+    first_pass_valid: bool = False
+    generation_requests: int = 1
 
 
 @dataclass(frozen=True)
@@ -137,6 +146,9 @@ class IntelligenceReport:
     generation_config: dict[str, object] = field(default_factory=dict)
     point_estimate_better: bool | None = None
     improvement_is_internal_only: bool | None = None
+    first_pass_valid: int = 0
+    response_count: int = 0
+    ollama_generation_requests: int = 0
     code_version: str = INTELLIGENCE_VERSION
 
 
@@ -303,6 +315,10 @@ class _Session:
         self.syntax_failed = False
         self.model_name = ""
         self.model_digest = ""
+        self.response_count = 0
+        self.first_pass_valid = 0
+        self.generation_requests = 0
+        self.last_turn: ModelTurn | None = None
 
     def run(self) -> IntelligenceReport:
         plan = self._plan()
@@ -335,6 +351,7 @@ class _Session:
             self._log_turn("plan", turn, parent_id=None)
             return None
         decision = validate_research_plan(turn.content)
+        self._count_response(decision.accepted)
         self._log_plan(decision, turn)
         if decision.accepted and decision.plan is not None:
             self.plan = decision.plan
@@ -361,6 +378,7 @@ class _Session:
             self._log_turn("syntax_repair", repair, parent_id=None)
             return None
         repaired = validate_research_plan(repair.content)
+        self._count_response(repaired.accepted)
         self._log_plan(repaired, repair, brief=brief.as_dict())
         if repaired.plan is None:
             self.final = ("plan_rejected", repaired.reason)
@@ -459,12 +477,13 @@ class _Session:
         parent_expression: str | None,
     ) -> IntelligenceAttempt:
         decision = self._gate(content, is_revision=is_revision, parent_id=parent_id, parent_expression=parent_expression)
+        self._count_response(decision.accepted)
         assessment: EditAssessment | None = None
         source = content
         while not decision.accepted:
             attempt = self._log_gate(step if assessment is None else "syntax_repair", decision, assessment)
             brief = build_repair_brief(decision.code, decision.reason, decision.expression)
-            if brief is None or self.syntax_repairs >= MAX_SYNTAX_REPAIRS or not self._room("repair") or self.stopped is not None:
+            if brief is None or not self._may_repair(is_revision=is_revision) or self.stopped is not None:
                 if brief is not None and decision.code in {"invalid_json", "unsafe_math", "too_complex", "unknown_feature", "feature_mismatch", "missing_feature"}:
                     marked = replace(attempt, status="syntax_unrepaired", detail=f"{decision.code}: {decision.reason}"[:300])
                     self.attempts[-1] = marked
@@ -489,6 +508,7 @@ class _Session:
             assessment = classify_edit(decision.expression or peek_expression(source) or "", peek_expression(repair.content) or "")
             source = repair.content
             decision = self._gate(source, is_revision=is_revision, parent_id=parent_id, parent_expression=parent_expression)
+            self._count_response(decision.accepted)
             step = "syntax_repair"
         return self._admit(decision, step=step, is_revision=is_revision, parent_expression=parent_expression, assessment=assessment)
 
@@ -525,6 +545,7 @@ class _Session:
         equivalent = False if semantic_change else (None if assessment is None and not decision.edit_kind else assessment.equivalent if assessment else False)
         separate = bool(assessment is not None and assessment.equivalent is False and assessment.kind != "unparsable")
         hypothesis_id = formula_key(draft.expression, draft.features, draft.horizon_days, _applicability(self.strategy_id, draft.expected_regime))
+        parent_brier, parent_delta = self._parent_delta(draft.parent_hypothesis_id, evaluation.brier_score)
         if not evaluation.accepted:
             return self._append(IntelligenceAttempt(
                 step=step,
@@ -548,6 +569,9 @@ class _Session:
                 model_digest=self.model_digest,
                 revision_reason=_revision_reason(decision, is_revision),
                 detail=evaluation.reason,
+                parent_brier=parent_brier,
+                parent_delta=parent_delta,
+                format_normalized=decision.format_normalized,
             ))
         version = sum(1 for item in self.attempts if item.execution_success) + 1
         feedback = build_scientific_feedback(
@@ -598,7 +622,10 @@ class _Session:
             model_digest=self.model_digest,
             persisted=persisted,
             revision_reason=_revision_reason(decision, is_revision),
-            detail=evaluation.reason,
+            detail=_attempt_detail(evaluation.reason, decision),
+            parent_brier=parent_brier,
+            parent_delta=parent_delta,
+            format_normalized=decision.format_normalized,
         ))
 
     def _gate(self, content: str, *, is_revision: bool, parent_id: str | None, parent_expression: str | None) -> GateResult:
@@ -623,6 +650,7 @@ class _Session:
         if not self._room(bucket):
             self.stopped = ("budget_exhausted", "исчерпан заранее заданный бюджет обращений к модели")
             return ModelTurn("budget_exhausted", self.stopped[1], None)
+        self._arm_generation_budget(bucket)
         if self.clock() - self.started > self.deadline:
             self.stopped = ("time_limit", "исчерпан бюджет времени")
             return ModelTurn("time_limit", self.stopped[1], None)
@@ -636,10 +664,54 @@ class _Session:
         else:
             self.gen_calls += 1
         turn = factory()
+        extra = max(0, int(getattr(turn, "generation_requests", 1) or 1) - 1)
+        if extra:
+            self.calls += extra
+            self.generation_requests += extra
+            if bucket != "plan":
+                self.gen_calls += extra
+        self.generation_requests += 1
         self._note_model(turn)
-        if turn.status != "ok":
+        if self.calls > MAX_MODEL_CALLS or self.gen_calls > MAX_GENERATION_REPAIR_CALLS:
+            self.stopped = ("budget_exhausted", "фактические обращения к генерации вышли за потолок")
+        elif turn.status != "ok":
             self.stopped = (turn.status, turn.message or turn.status)
         return turn
+
+    def _arm_generation_budget(self, bucket: str) -> None:
+        if not isinstance(self.client, OllamaAdapter):
+            return
+        remaining = MAX_MODEL_CALLS - self.calls
+        if bucket != "plan":
+            remaining = min(remaining, MAX_GENERATION_REPAIR_CALLS - self.gen_calls)
+        self.client.generation_budget = max(1, remaining)
+        self.client.allow_format_fallback = remaining > 1
+
+    def _may_repair(self, *, is_revision: bool) -> bool:
+        if self.syntax_repairs >= MAX_SYNTAX_REPAIRS or not self._room("repair"):
+            return False
+        if is_revision:
+            return True
+        executable = any(item.execution_success for item in self.attempts)
+        if executable and self.syntax_repairs >= MAX_SYNTAX_REPAIRS - 1:
+            return False
+        return True
+
+    def _count_response(self, accepted: bool) -> None:
+        self.response_count += 1
+        if accepted:
+            self.first_pass_valid += 1
+
+    def _parent_delta(self, parent_id: str | None, child_brier: float | None) -> tuple[float | None, float | None]:
+        if parent_id is None or child_brier is None:
+            return None, None
+        parent = next(
+            (item for item in self.attempts if item.hypothesis_id == parent_id and item.brier_score is not None),
+            None,
+        )
+        if parent is None or parent.brier_score is None:
+            return None, None
+        return parent.brier_score, round(child_brier - parent.brier_score, 6)
 
     def _wait_for_memory(self) -> str | None:
         """До первого вызова нехватка памяти останавливает цикл сразу.
@@ -760,6 +832,15 @@ class _Session:
         ))
 
     def _append(self, attempt: IntelligenceAttempt) -> IntelligenceAttempt:
+        if self.last_turn is not None and not attempt.schema_mode:
+            attempt = replace(
+                attempt,
+                schema_mode=self.last_turn.schema_mode,
+                format_fallback=self.last_turn.format_fallback,
+                fallback_reason=self.last_turn.fallback_reason,
+                truncated=self.last_turn.truncated,
+                generation_requests=self.last_turn.generation_requests,
+            )
         self.attempts.append(attempt)
         self._remember(attempt)
         return attempt
@@ -795,6 +876,7 @@ class _Session:
         del parent_expression
 
     def _note_model(self, turn: ModelTurn) -> None:
+        self.last_turn = turn
         if turn.model_name:
             self.model_name = turn.model_name
         if turn.model_digest:
@@ -934,6 +1016,9 @@ class _Session:
             generation_config=self._config_now(),
             point_estimate_better=better,
             improvement_is_internal_only=internal,
+            first_pass_valid=self.first_pass_valid,
+            response_count=self.response_count,
+            ollama_generation_requests=self.generation_requests,
             independent_validation=False,
             validated_law=False,
             claim_status=_NO_LAW,
@@ -965,6 +1050,9 @@ def public_report(report: IntelligenceReport) -> dict[str, object]:
         "multiple_testing_note": report.multiple_testing_note,
         "point_estimate_better": report.point_estimate_better,
         "improvement_is_internal_only": report.improvement_is_internal_only,
+        "first_pass_valid": report.first_pass_valid,
+        "response_count": report.response_count,
+        "ollama_generation_requests": report.ollama_generation_requests,
         "comparison": [dict(item) for item in report.comparison],
         "generation_config": dict(report.generation_config),
         "attempts": [_attempt_payload(item, {}) for item in report.attempts],
@@ -1006,6 +1094,15 @@ def _attempt_payload(attempt: IntelligenceAttempt, config: Mapping[str, object])
         "persisted": attempt.persisted,
         "revision_reason": attempt.revision_reason,
         "detail": attempt.detail,
+        "parent_brier": attempt.parent_brier,
+        "parent_delta": attempt.parent_delta,
+        "format_normalized": attempt.format_normalized,
+        "schema_mode": attempt.schema_mode,
+        "format_fallback": attempt.format_fallback,
+        "fallback_reason": attempt.fallback_reason,
+        "truncated": attempt.truncated,
+        "first_pass_valid": attempt.first_pass_valid,
+        "generation_requests": attempt.generation_requests,
         "generation_config": dict(config),
         "qwen_generator_version": QWEN_GENERATOR_VERSION,
     }
@@ -1024,6 +1121,9 @@ def _comparison(scored: Sequence[IntelligenceAttempt]) -> tuple[dict[str, object
             "log_loss": item.log_loss,
             "baseline_brier": item.baseline_brier,
             "error_difference": item.improvement,
+            "parent_brier": item.parent_brier,
+            "parent_delta": item.parent_delta,
+            "decision_count": None if item.scientific_feedback is None else item.scientific_feedback.get("decision_count"),
             "uncertainty": item.uncertainty,
             "same_dates": item.test_dates == dates,
         })
@@ -1057,6 +1157,12 @@ def _applicability(strategy_id: str, regime: str) -> dict[str, object]:
 
 def _applicability_text(strategy_id: str, regime: str) -> str:
     return f"strategy={strategy_id}; regime={regime}; market=synthetic-2019-2020; btc_claim=false"
+
+
+def _attempt_detail(reason: str, decision: GateResult) -> str:
+    if decision.format_normalized:
+        return f"{reason}; формат parent_hypothesis_id приведён к null без нового вызова"[:300]
+    return reason
 
 
 def _revision_reason(decision: GateResult, is_revision: bool) -> str | None:

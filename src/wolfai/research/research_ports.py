@@ -22,6 +22,11 @@ class ModelTurn:
     rss_bytes: int = 0
     seed: int = 0
     temperature: float = 0.0
+    schema_mode: str = ""
+    format_fallback: bool = False
+    fallback_reason: str = ""
+    truncated: bool = False
+    generation_requests: int = 1
 
 
 @dataclass(frozen=True)
@@ -116,4 +121,9 @@ def invoke_model(
         rss_bytes=int(getattr(result, "rss_bytes", 0) or 0),
         seed=int(getattr(result, "seed", 0) or 0),
         temperature=float(getattr(result, "temperature", temperature) or temperature),
+        schema_mode=str(getattr(result, "schema_mode", "") or ""),
+        format_fallback=bool(getattr(result, "format_fallback", False)),
+        fallback_reason=str(getattr(result, "fallback_reason", "") or ""),
+        truncated=bool(getattr(result, "truncated", False)),
+        generation_requests=max(1, int(getattr(result, "generation_requests", 1) or 1)),
     )

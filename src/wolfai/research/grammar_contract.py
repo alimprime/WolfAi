@@ -20,8 +20,8 @@ from wolfai.research.formula import (
 )
 from wolfai.research.hypothesis_protocol import HORIZONS, REGIMES, proposal_schema
 
-INTELLIGENCE_VERSION = "3.2.0"
-GENERATOR_VERSION = "3.2.0"
+INTELLIGENCE_VERSION = "3.3.0"
+GENERATOR_VERSION = "3.3.0"
 FIXED_EVALUATION_METHOD = "fixed_internal_brier_log_loss"
 STRATEGY_ID = "qwen-research-strategy"
 
